@@ -2,7 +2,7 @@
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use futures::future::try_select;
 use futures::TryFutureExt;
@@ -15,22 +15,20 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let listen_addr = env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:25565".to_string());
-    let server_addr = env::args()
-        .nth(2)
-        .unwrap_or_else(|| "127.0.0.1:31234".to_string());
+
+    // panics if no listen addr or server addr is provided
+    let listen_addr = env::args().nth(1).unwrap();
+    let server_addr = env::args().nth(2).unwrap();
 
     println!("Listening on: {}", listen_addr);
     println!("Proxying to: {}", server_addr);
 
-    let connections_counter = Arc::new(Mutex::new(0));
+    let connections_counter = Arc::new(RwLock::new(0));
 
     let mut listener = TcpListener::bind(listen_addr).await?;
 
     while let Ok((client_stream, _)) = listener.accept().await {
-        let proxy = proxy(client_stream, server_addr.clone(), connections_counter.clone()).map(|result| {
+        let proxy_stream = proxy_stream(client_stream, server_addr.clone(), connections_counter.clone()).map(|result| {
             if let Err(e) = result {
                 println!("An error occured : {}", e);
             }
@@ -42,14 +40,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-
-async fn proxy(mut client_stream: TcpStream, server_addr: String, connections_counter: Arc<Mutex<usize>>) -> Result<(), Box<dyn Error>> {
+// this proxies the stream to the server
+// however counting connections this way is bad because the function might fail and we would never
+// decrease the counter FIXME
+async fn proxy_stream(mut client_stream: TcpStream, server_addr: String, connections_counter: Arc<RwLock<usize>>) -> Result<(), Box<dyn Error>> {
 
     let mut server_stream = TcpStream::connect(server_addr).await?;
 
     // acquiring the lock on the counter
     {
-        let mut counter = connections_counter.lock().await;
+        let mut counter = connections_counter.write().await;
         *counter += 1;
     }
 
@@ -70,7 +70,7 @@ async fn proxy(mut client_stream: TcpStream, server_addr: String, connections_co
 
     //acquiring the lock on the counter
     {
-        let mut counter = connections_counter.lock().await;
+        let mut counter = connections_counter.write().await;
         *counter -= 1;
     }
 
