@@ -4,10 +4,6 @@ use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
-use futures::future::try_select;
-use futures::TryFutureExt;
-use futures::FutureExt;
-
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
@@ -28,53 +24,59 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut listener = TcpListener::bind(listen_addr).await?;
 
     while let Ok((client_stream, _)) = listener.accept().await {
-        let proxy_stream = proxy_stream(client_stream, server_addr.clone(), connections_counter.clone()).map(|result| {
-            if let Err(e) = result {
-                println!("An error occured : {}", e);
-            }
-        });
+        let new_client_future = handle_new_client(client_stream, server_addr.clone(), connections_counter.clone());
 
-        tokio::spawn(proxy);
+        // create a new task that can be run in parallel with other tasks
+        tokio::spawn(new_client_future);
     }
 
     Ok(())
 }
 
-// this proxies the stream to the server
-// however counting connections this way is bad because the function might fail and we would never
-// decrease the counter FIXME
-async fn proxy_stream(mut client_stream: TcpStream, server_addr: String, connections_counter: Arc<RwLock<usize>>) -> Result<(), Box<dyn Error>> {
+async fn handle_new_client(client_stream: TcpStream, server_addr: String, connections_counter: Arc<RwLock<usize>>) {
+    // These two branches will be run concurrently, but not in parallel 
+    let inc_counter_future = increment_counter(&connections_counter);
+    let proxy_future = proxy_stream(client_stream, server_addr);
 
-    let mut server_stream = TcpStream::connect(server_addr).await?;
-
-    // acquiring the lock on the counter
-    {
-        let mut counter = connections_counter.write().await;
-        *counter += 1;
+    // Only try to decrement the counter when both branches completed
+    let (proxy_result, _) = tokio::join!(proxy_future, inc_counter_future);
+    if let Err(e) = proxy_result {
+        println!("An error occured : {}", e);
     }
 
+    decrement_counter(&connections_counter).await;
+}
+
+async fn increment_counter(connections_counter: &Arc<RwLock<usize>>) {
+    {//acquire the lock here
+        let mut counter = connections_counter.write().await;
+        *counter += 1;
+    }//dropped the lock here
+
     println!("New connection opened !");
+}
+
+async fn decrement_counter(connections_counter: &Arc<RwLock<usize>>) {
+    {// acquire the lock here
+        let mut counter = connections_counter.write().await;
+        *counter -= 1;
+    }// dropped the lock here
+
+    println!("Connection closed.");
+}
+
+// proxies the stream to the server
+async fn proxy_stream(mut client_stream: TcpStream, server_addr: String) -> Result<(), Box<dyn Error+Send+Sync>>{
+
+    let mut server_stream = TcpStream::connect(server_addr).await?;
 
     let (mut read_client, mut write_client) = client_stream.split();
     let (mut read_server, mut write_server) = server_stream.split();
 
-    let client_to_proxy = io::copy(&mut read_client, &mut write_server);
-    let proxy_to_server = io::copy(&mut read_server, &mut write_client);
-
-    try_select(client_to_proxy, proxy_to_server).map_err(|e| {
-        match e {
-            futures::future::Either::Left((e, _)) => e,
-            futures::future::Either::Right((e, _)) => e,
-        }
-    }).await?;
-
-    //acquiring the lock on the counter
-    {
-        let mut counter = connections_counter.write().await;
-        *counter -= 1;
+    tokio::select! {
+        _client_to_proxy = io::copy(&mut read_client, &mut write_server) => {},
+        _proxy_to_server = io::copy(&mut read_server, &mut write_client) => {},
     }
-
-    println!("Connection closed.");
 
     Ok(())
 }
