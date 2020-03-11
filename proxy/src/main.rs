@@ -2,12 +2,18 @@
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 
 use std::env;
 use std::error::Error;
-use std::sync::Arc;
+
+#[derive(Debug)]
+enum ClientSignal {
+    New(oneshot::Sender<()>),
+    Close,
+    Timer(time::Instant),
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -22,16 +28,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Listening on: {}", listen_addr);
     println!("Proxying to: {}", server_addr);
 
-    let connections_counter = Arc::new(RwLock::new(0));
+    //create a mpsc channel that will be used by connected clients to announce their arrivals
+    let (sender, receiver) = mpsc::channel(10);
+
+    let watchdog_future = watchdog(receiver, sender.clone());
+    tokio::spawn(watchdog_future);
 
     let mut listener = TcpListener::bind(listen_addr).await?;
 
     while let Ok((client_stream, _)) = listener.accept().await {
-        let new_client_future = handle_new_client(
-            client_stream,
-            server_addr.clone(),
-            connections_counter.clone(),
-        );
+        let new_client_future =
+            handle_new_client(client_stream, server_addr.clone(), sender.clone());
 
         // create a new task that can be run in parallel with other tasks
         tokio::spawn(new_client_future);
@@ -40,46 +47,73 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn watchdog(
+    mut communication_recv_channel: mpsc::Receiver<ClientSignal>,
+    communication_send_channel: mpsc::Sender<ClientSignal>,
+) {
+    let mut connection_counter = 0;
+    let mut server_running = false;
+    let mut last_disconnect_timestamp = time::Instant::now();
+
+    while let Some(client_signal) = communication_recv_channel.recv().await {
+        match client_signal {
+            ClientSignal::New(client_response_channel) => {
+                if !server_running {
+                    server_running = true;
+                    println!("Start server !");
+                    println!("Server started");
+                }
+                // notifying client
+                connection_counter += 1;
+                client_response_channel.send(()).unwrap();
+            }
+            ClientSignal::Close => {
+                connection_counter -= 1;
+                if connection_counter == 0 {
+                    last_disconnect_timestamp = time::Instant::now();
+                    let last_disconnect_timestamp = last_disconnect_timestamp.clone();
+                    let mut communication_send_channel = communication_send_channel.clone();
+                    tokio::spawn(async move {
+                        time::delay_for(time::Duration::new(10, 0)).await;
+                        communication_send_channel
+                            .send(ClientSignal::Timer(last_disconnect_timestamp))
+                            .await
+                            .unwrap();
+                    });
+                }
+            }
+            ClientSignal::Timer(timestamp) => {
+                if last_disconnect_timestamp == timestamp {
+                    server_running = false;
+                    println!("Shutdown server !");
+                }
+            }
+        }
+    }
+}
+
 async fn handle_new_client(
     client_stream: TcpStream,
     server_addr: String,
-    connections_counter: Arc<RwLock<usize>>,
+    mut watchdog_channel: mpsc::Sender<ClientSignal>,
 ) {
     println!("New connection !");
 
-    if *connections_counter.read().await == 0 {
-        println!("Starting the server ! Please bear with us...");
-    }
+    let (sender, receiver) = oneshot::channel();
 
-    // These two branches will be run concurrently, but not in parallel
-    let inc_counter_future = increment_counter(&connections_counter);
-    let proxy_future = proxy_stream(client_stream, server_addr);
+    // let watchdog know a new connection was received
+    watchdog_channel
+        .send(ClientSignal::New(sender))
+        .await
+        .unwrap();
+    // make sure the server started before proxying
+    receiver.await.unwrap();
 
     println!("Proxying the new connection to the server...");
-
-    // Only try to decrement the counter when both branches completed
-    let _ = tokio::join!(proxy_future, inc_counter_future);
+    let _ = proxy_stream(client_stream, server_addr).await;
 
     println!("Connection closed !");
-
-    // if there are no more clients, start a shutdown countdown
-    if *connections_counter.read().await == 1 {
-        println!("No connections left, starting 1m timer...");
-        time::delay_for(time::Duration::new(60, 0)).await;
-        println!("Server shutdown...");
-    }
-
-    decrement_counter(&connections_counter).await;
-}
-
-async fn increment_counter(connections_counter: &Arc<RwLock<usize>>) {
-    let mut counter = connections_counter.write().await;
-    *counter += 1;
-}
-
-async fn decrement_counter(connections_counter: &Arc<RwLock<usize>>) {
-    let mut counter = connections_counter.write().await;
-    *counter -= 1;
+    watchdog_channel.send(ClientSignal::Close).await.unwrap();
 }
 
 // proxies the stream to the server
