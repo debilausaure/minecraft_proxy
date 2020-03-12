@@ -8,11 +8,9 @@ use tokio::time;
 use std::env;
 use std::error::Error;
 
-#[derive(Debug)]
 enum ClientSignal {
     New(oneshot::Sender<()>),
     Close,
-    Timer(time::Instant),
 }
 
 #[tokio::main]
@@ -20,25 +18,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // panics if no listen addr or server addr is provided
     let listen_addr = env::args()
         .nth(1)
-        .expect("You must provide an address to listen on...");
+        .expect("You must provide an address to listen on as a first argument");
     let server_addr = env::args()
         .nth(2)
-        .expect("You must provide an address to proxy to...");
+        .expect("You must provide an address to proxy to as a second argument");
 
     println!("Listening on: {}", listen_addr);
     println!("Proxying to: {}", server_addr);
 
-    //create a mpsc channel that will be used by connected clients to announce their arrivals
-    let (sender, receiver) = mpsc::channel(10);
+    //create a channel that will be used by connected clients to announce their arrival to the watchdog
+    let (watchdog_notification_channel, watchdog_receive_channel) = mpsc::channel(10);
 
-    let watchdog_future = watchdog(receiver, sender.clone());
+    //spawn a watchdog that will handle connection and disconnection events
+    let watchdog_future = watchdog(watchdog_receive_channel);
     tokio::spawn(watchdog_future);
 
     let mut listener = TcpListener::bind(listen_addr).await?;
 
     while let Ok((client_stream, _)) = listener.accept().await {
         let new_client_future =
-            handle_new_client(client_stream, server_addr.clone(), sender.clone());
+            handle_new_client(client_stream, server_addr.clone(), watchdog_notification_channel.clone());
 
         // create a new task that can be run in parallel with other tasks
         tokio::spawn(new_client_future);
@@ -49,47 +48,71 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn watchdog(
     mut communication_recv_channel: mpsc::Receiver<ClientSignal>,
-    communication_send_channel: mpsc::Sender<ClientSignal>,
 ) {
     let mut connection_counter = 0;
     let mut server_running = false;
-    let mut last_disconnect_timestamp = time::Instant::now();
+    //let mut last_disconnect_timestamp = time::Instant::now();
 
-    while let Some(client_signal) = communication_recv_channel.recv().await {
-        match client_signal {
-            ClientSignal::New(client_response_channel) => {
-                if !server_running {
-                    server_running = true;
-                    println!("Start server !");
-                    println!("Server started");
+    loop {
+        tokio::select! {
+            Some(client_signal) = communication_recv_channel.recv() => {
+                match client_signal {
+                   ClientSignal::New(client_response_channel) => {
+                        if !server_running {
+                            server_running = true;
+                            println!("Server started");
+                        }
+                        // notifying client
+                        connection_counter += 1;
+                        client_response_channel.send(()).unwrap();
+                    }
+                    ClientSignal::Close => {
+                        connection_counter -= 1;
+                    }
                 }
-                // notifying client
-                connection_counter += 1;
-                client_response_channel.send(()).unwrap();
-            }
-            ClientSignal::Close => {
-                connection_counter -= 1;
-                if connection_counter == 0 {
-                    last_disconnect_timestamp = time::Instant::now();
-                    let last_disconnect_timestamp = last_disconnect_timestamp.clone();
-                    let mut communication_send_channel = communication_send_channel.clone();
-                    tokio::spawn(async move {
-                        time::delay_for(time::Duration::new(10, 0)).await;
-                        communication_send_channel
-                            .send(ClientSignal::Timer(last_disconnect_timestamp))
-                            .await
-                            .unwrap();
-                    });
-                }
-            }
-            ClientSignal::Timer(timestamp) => {
-                if last_disconnect_timestamp == timestamp {
-                    server_running = false;
-                    println!("Shutdown server !");
-                }
+            },
+            _ = time::delay_for(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
+                server_running = false;
+                println!("Timer elapsed, server shutdown !");
             }
         }
     }
+
+    //while let Some(client_signal) = communication_recv_channel.recv().await {
+    //    match client_signal {
+    //        ClientSignal::New(client_response_channel) => {
+    //            if !server_running {
+    //                server_running = true;
+    //                println!("Start server !");
+    //                println!("Server started");
+    //            }
+    //            // notifying client
+    //            connection_counter += 1;
+    //            client_response_channel.send(()).unwrap();
+    //        }
+    //        ClientSignal::Close => {
+    //            connection_counter -= 1;
+    //            if connection_counter == 0 {
+    //                last_disconnect_timestamp = time::Instant::now();
+    //                let last_disconnect_timestamp = last_disconnect_timestamp.clone();
+    //                let mut communication_send_channel = communication_send_channel.clone();
+    //                tokio::spawn(async move {
+    //                    time::delay_for(time::Duration::new(10, 0)).await;
+    //                    communication_send_channel
+    //                        .send(ClientSignal::Timer(last_disconnect_timestamp))
+    //                        .await
+    //                        .unwrap();
+    //                });
+    //            }
+    //        }
+    //        ClientSignal::Timer(timestamp) => {
+    //            if last_disconnect_timestamp == timestamp {
+    //                server_running = false;
+    //                println!("Shutdown server !");
+    //            }
+    //        }
+    //    }
+    //}
 }
 
 async fn handle_new_client(
