@@ -9,7 +9,7 @@ use std::env;
 use std::error::Error;
 
 #[derive(Debug)]
-enum ClientSignal {
+enum TaskSignal {
     New(oneshot::Sender<()>),
     Close,
 }
@@ -27,18 +27,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Listening on: {}", listen_addr);
     println!("Proxying to: {}", server_addr);
 
-    //create a channel that will be used by connected clients to announce their arrival to the watchdog
-    let (watchdog_notification_channel, watchdog_receive_channel) = mpsc::channel(10);
+    //create a channel that will be used by client tasks to announce client arrivals to the watchdog
+    let (watchdog_notify_channel, watchdog_listen_channel) = mpsc::channel(10);
 
     //spawn a watchdog that will handle connection and disconnection events
-    let watchdog_future = watchdog(watchdog_receive_channel);
+    //and decide to start / stop the server
+    let watchdog_future = watchdog(watchdog_listen_channel);
     tokio::spawn(watchdog_future);
 
     let mut listener = TcpListener::bind(listen_addr).await?;
 
     while let Ok((client_stream, _)) = listener.accept().await {
-        let new_client_future =
-            handle_new_client(client_stream, server_addr.clone(), watchdog_notification_channel.clone());
+        let new_client_future = handle_new_client(
+            client_stream,
+            server_addr.clone(),
+            watchdog_notify_channel.clone(),
+        );
 
         // create a new task that can be run in parallel with other tasks
         tokio::spawn(new_client_future);
@@ -47,97 +51,67 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn watchdog(
-    mut communication_recv_channel: mpsc::Receiver<ClientSignal>,
-) {
+async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
     let mut connection_counter = 0;
     let mut server_running = false;
-    //let mut last_disconnect_timestamp = time::Instant::now();
 
     loop {
         tokio::select! {
-            Some(client_signal) = communication_recv_channel.recv() => {
-                match client_signal {
-                   ClientSignal::New(client_response_channel) => {
+            // if there are no active connections to the server and server is up, start a timer
+            _ = time::delay_for(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
+                server_running = false;
+                println!("Timer elapsed, server shutdown !");
+            },
+
+            // listen for incoming signals
+            Some(task_signal) = watchdog_listen_channel.recv() => {
+                match task_signal {
+                    // a new client connected to the proxy
+                    TaskSignal::New(task_notify_channel) => {
                         if !server_running {
                             server_running = true;
                             println!("Server started");
                         }
-                        // notifying client
+                        // notify client task that it can connect to the server
                         connection_counter += 1;
-                        client_response_channel.send(()).unwrap();
+                        task_notify_channel.send(()).unwrap();
                     }
-                    ClientSignal::Close => {
+                    TaskSignal::Close => {
                         connection_counter -= 1;
                     }
                 }
             },
-            _ = time::delay_for(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
-                server_running = false;
-                println!("Timer elapsed, server shutdown !");
-            }
         }
     }
-
-    //while let Some(client_signal) = communication_recv_channel.recv().await {
-    //    match client_signal {
-    //        ClientSignal::New(client_response_channel) => {
-    //            if !server_running {
-    //                server_running = true;
-    //                println!("Start server !");
-    //                println!("Server started");
-    //            }
-    //            // notifying client
-    //            connection_counter += 1;
-    //            client_response_channel.send(()).unwrap();
-    //        }
-    //        ClientSignal::Close => {
-    //            connection_counter -= 1;
-    //            if connection_counter == 0 {
-    //                last_disconnect_timestamp = time::Instant::now();
-    //                let last_disconnect_timestamp = last_disconnect_timestamp.clone();
-    //                let mut communication_send_channel = communication_send_channel.clone();
-    //                tokio::spawn(async move {
-    //                    time::delay_for(time::Duration::new(10, 0)).await;
-    //                    communication_send_channel
-    //                        .send(ClientSignal::Timer(last_disconnect_timestamp))
-    //                        .await
-    //                        .unwrap();
-    //                });
-    //            }
-    //        }
-    //        ClientSignal::Timer(timestamp) => {
-    //            if last_disconnect_timestamp == timestamp {
-    //                server_running = false;
-    //                println!("Shutdown server !");
-    //            }
-    //        }
-    //    }
-    //}
 }
 
 async fn handle_new_client(
     client_stream: TcpStream,
     server_addr: String,
-    mut watchdog_channel: mpsc::Sender<ClientSignal>,
+    mut watchdog_notify_channel: mpsc::Sender<TaskSignal>,
 ) {
     println!("New connection !");
 
-    let (sender, receiver) = oneshot::channel();
+    // create a channel sent to the watchdog to know whether
+    // we can initiate connection to the server or not
+    let (task_notify_channel, task_listen_channel) = oneshot::channel();
 
     // let watchdog know a new connection was received
-    watchdog_channel
-        .send(ClientSignal::New(sender))
+    watchdog_notify_channel
+        .send(TaskSignal::New(task_notify_channel))
         .await
         .unwrap();
     // make sure the server started before proxying
-    receiver.await.unwrap();
+    task_listen_channel.await.unwrap();
 
     println!("Proxying the new connection to the server...");
     let _ = proxy_stream(client_stream, server_addr).await;
 
     println!("Connection closed !");
-    watchdog_channel.send(ClientSignal::Close).await.unwrap();
+    watchdog_notify_channel
+        .send(TaskSignal::Close)
+        .await
+        .unwrap();
 }
 
 // proxies the stream to the server
@@ -151,8 +125,8 @@ async fn proxy_stream(
     let (mut read_server, mut write_server) = server_stream.split();
 
     tokio::select! {
-        _client_to_proxy = io::copy(&mut read_client, &mut write_server) => {},
-        _proxy_to_server = io::copy(&mut read_server, &mut write_client) => {},
+        _ = io::copy(&mut read_client, &mut write_server) => {},
+        _ = io::copy(&mut read_server, &mut write_client) => {},
     }
 
     Ok(())
