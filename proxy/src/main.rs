@@ -8,6 +8,7 @@ use tokio::time;
 use std::env;
 use std::error::Error;
 
+#[derive(Debug)]
 enum ClientSignal {
     New(oneshot::Sender<()>),
     Close,
