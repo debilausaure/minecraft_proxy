@@ -11,10 +11,16 @@ RUN rustup target add x86_64-unknown-linux-musl\
  && cargo build --target x86_64-unknown-linux-musl --release -q\
  && cp -L /target/x86_64-unknown-linux-musl/release/minecraft_proxy /minecraft_proxy 
 
-# Copy to a scratch image
-FROM scratch
+# Copy to an alpine image
+FROM alpine:3.11
 
-COPY --from=builder /minecraft_proxy .
+RUN apk update && apk add curl --no-cache\
+ && addgroup -g 985 -S docker\
+ && adduser minecraft_dockerd -S -G docker -u 973 -s /sbin/nologin
+
+USER minecraft_dockerd
+
+COPY --from=builder --chown=minecraft_dockerd:docker /minecraft_proxy .
 
 ENTRYPOINT ["./minecraft_proxy"]
 # default listen addr, default forward addr
