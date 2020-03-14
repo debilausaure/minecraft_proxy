@@ -2,11 +2,13 @@
 
 use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time;
 
 use std::env;
 use std::error::Error;
+use std::process;
 
 #[derive(Debug)]
 enum TaskSignal {
@@ -60,7 +62,11 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
             // if there are no active connections to the server and server is up, start a timer
             _ = time::delay_for(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
                 server_running = false;
-                println!("Timer elapsed, server shutdown !");
+                print!("Timer elapsed, stopping the server... ");
+                if !stop_server().await.success(){
+                    panic!("Failed to stop the server :(");
+                }
+                println!("Server stopped")
             },
 
             // listen for incoming signals
@@ -69,8 +75,12 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
                     // a new client connected to the proxy
                     TaskSignal::New(task_notify_channel) => {
                         if !server_running {
-                            server_running = true;
+                            print!("Starting the server... ");
+                            if !start_server().await.success() {
+                                panic!("Failed to start the server :(");
+                            }
                             println!("Server started");
+                            server_running = true;
                         }
                         // notify client task that it can connect to the server
                         connection_counter += 1;
@@ -83,6 +93,22 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
             },
         }
     }
+}
+
+async fn start_server() -> process::ExitStatus {
+    Command::new("docker")
+        .args(&["start", "mc_alpine"])
+        .status()
+        .await
+        .expect("Failed to start the server container")
+}
+
+async fn stop_server() -> process::ExitStatus {
+    Command::new("docker")
+        .args(&["stop", "mc_alpine"])
+        .status()
+        .await
+        .expect("Failed to stop the server container")
 }
 
 async fn handle_new_client(
