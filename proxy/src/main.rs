@@ -73,7 +73,7 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
     loop {
         tokio::select! {
             // if there are no active connections to the server and server is up, start a timer
-            _ = time::delay_for(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
+            _ = time::delay_for(time::Duration::from_secs(60)), if server_running && (connection_counter == 0) => {
                 server_running = false;
                 print!("Timer elapsed, stopping the server... ");
                 if !stop_server().await.success(){
@@ -130,14 +130,17 @@ async fn handle_new_client(
     fsm : &Fsm<'_>,
     mut watchdog_notify_channel: mpsc::Sender<TaskSignal>,
 ) {
-    println!("New connection !");
-
     let (client_stream, packet) = match fsm.run(client_stream).await.unwrap() {
         // server list ping
-        None => return,
+        None => {
+            println!("Server list ping !");
+            return
+        },
         // server connection
         Some((client_stream, packet)) => (client_stream, packet),
     };
+
+    println!("New connection !");
 
     // create a channel sent to the watchdog to know whether
     // we can initiate connection to the server or not
