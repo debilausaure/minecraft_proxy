@@ -1,6 +1,6 @@
 [package]
 name = "minecraft_proxy"
-version = "0.1.0"
+version = "1.0.0"
 authors = ["debilausaure"]
 edition= "2018"
 
@@ -8,6 +8,5 @@ edition= "2018"
 
 [dependencies]
 tokio = { version = "0.2", features = ["dns", "io-util", "macros", "process", "rt-threaded", "sync", "tcp", "time"] }
-futures = "0.3"
 #mc_server_list_ping = {path="../../mc_server_list_ping"}
 mc_server_list_ping = {git="https://github.com/debilausaure/mc_server_list_ping"}
