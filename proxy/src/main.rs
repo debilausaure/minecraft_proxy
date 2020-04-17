@@ -10,6 +10,9 @@ use std::env;
 use std::error::Error;
 use std::process;
 
+use mc_server_list_ping::*;
+use mc_server_list_ping::types::HandshakePacket;
+
 #[derive(Debug)]
 enum TaskSignal {
     New(oneshot::Sender<()>),
@@ -35,7 +38,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //spawn a watchdog that will handle connection and disconnection events
     //and decide to start / stop the server
     let watchdog_future = watchdog(watchdog_listen_channel);
-    tokio::spawn(watchdog_future);
+    let _watchdog_handle = tokio::spawn(watchdog_future);
+
+    let fsm = Fsm::new(
+        "1.15.2",
+        578,
+    ).description(
+        "Server not started",
+    );
+    let fsm = Box::new(fsm);
+    let fsm : &'static Fsm<'_> = Box::leak(fsm);
 
     let mut listener = TcpListener::bind(listen_addr).await?;
 
@@ -43,6 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let new_client_future = handle_new_client(
             client_stream,
             server_addr.clone(),
+            &fsm,
             watchdog_notify_channel.clone(),
         );
 
@@ -114,9 +127,17 @@ async fn stop_server() -> process::ExitStatus {
 async fn handle_new_client(
     client_stream: TcpStream,
     server_addr: String,
+    fsm : &Fsm<'_>,
     mut watchdog_notify_channel: mpsc::Sender<TaskSignal>,
 ) {
     println!("New connection !");
+
+    let (client_stream, packet) = match fsm.run(client_stream).await.unwrap() {
+        // server list ping
+        None => return,
+        // server connection
+        Some((client_stream, packet)) => (client_stream, packet),
+    };
 
     // create a channel sent to the watchdog to know whether
     // we can initiate connection to the server or not
@@ -131,7 +152,7 @@ async fn handle_new_client(
     task_listen_channel.await.unwrap();
 
     println!("Proxying the new connection to the server...");
-    let _ = proxy_stream(client_stream, server_addr).await;
+    let _ = proxy_stream(client_stream, server_addr, packet).await;
 
     println!("Connection closed !");
     watchdog_notify_channel
@@ -144,8 +165,11 @@ async fn handle_new_client(
 async fn proxy_stream(
     mut client_stream: TcpStream,
     server_addr: String,
+    packet: HandshakePacket,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut server_stream = TcpStream::connect(server_addr).await?;
+
+    packet.send(&mut server_stream).await?;
 
     let (mut read_client, mut write_client) = client_stream.split();
     let (mut read_server, mut write_server) = server_stream.split();
