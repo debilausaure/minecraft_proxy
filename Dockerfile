@@ -13,7 +13,7 @@ RUN rustup target add x86_64-unknown-linux-musl\
  && strip /minecraft_proxy
 
 # Copy to an alpine image
-FROM alpine:3.11
+FROM alpine:latest
 
 RUN apk update && apk add curl --no-cache
 # && addgroup -g 985 -S docker\

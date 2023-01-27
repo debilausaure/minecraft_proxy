@@ -1,10 +1,10 @@
 [package]
 name = "minecraft_proxy"
 version = "1.0.0"
-authors = ["debilausaure"]
-edition= "2018"
+authors = ["debilausaure", "irevoire"]
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "0.2", features = ["dns", "io-util", "macros", "process", "rt-threaded", "sync", "tcp", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

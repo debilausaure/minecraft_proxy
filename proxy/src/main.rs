@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let watchdog_future = watchdog(watchdog_listen_channel);
     tokio::spawn(watchdog_future);
 
-    let mut listener = TcpListener::bind(listen_addr).await?;
+    let listener = TcpListener::bind(listen_addr).await?;
 
     while let Ok((client_stream, _)) = listener.accept().await {
         let new_client_future = handle_new_client(
@@ -60,7 +60,7 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
     loop {
         tokio::select! {
             // if there are no active connections to the server and server is up, start a timer
-            _ = time::delay_for(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
+            _ = time::sleep(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
                 server_running = false;
                 print!("Timer elapsed, stopping the server... ");
                 if !stop_server().await.success(){
@@ -114,7 +114,7 @@ async fn stop_server() -> process::ExitStatus {
 async fn handle_new_client(
     client_stream: TcpStream,
     server_addr: String,
-    mut watchdog_notify_channel: mpsc::Sender<TaskSignal>,
+    watchdog_notify_channel: mpsc::Sender<TaskSignal>,
 ) {
     println!("New connection !");
 
