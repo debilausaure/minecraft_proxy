@@ -8,3 +8,4 @@ edition = "2021"
 
 [dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+mc_server_list_ping = {git="https://github.com/debilausaure/mc_server_list_ping"}

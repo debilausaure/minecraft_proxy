@@ -10,6 +10,9 @@ use std::env;
 use std::error::Error;
 use std::process;
 
+use mc_server_list_ping::*;
+use mc_server_list_ping::types::HandshakePacket;
+
 #[derive(Debug)]
 enum TaskSignal {
     New(oneshot::Sender<()>),
@@ -35,7 +38,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //spawn a watchdog that will handle connection and disconnection events
     //and decide to start / stop the server
     let watchdog_future = watchdog(watchdog_listen_channel);
-    tokio::spawn(watchdog_future);
+    let _watchdog_handle = tokio::spawn(watchdog_future);
+
+    let fsm = Fsm::new(
+        "1.19.3",
+        761,
+    ).description(
+        "Debilausaure's server",
+    );
+    let fsm = Box::new(fsm);
+    let fsm : &'static Fsm<'_> = Box::leak(fsm);
 
     let listener = TcpListener::bind(listen_addr).await?;
 
@@ -43,6 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let new_client_future = handle_new_client(
             client_stream,
             server_addr.clone(),
+            &fsm,
             watchdog_notify_channel.clone(),
         );
 
@@ -60,7 +73,7 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
     loop {
         tokio::select! {
             // if there are no active connections to the server and server is up, start a timer
-            _ = time::sleep(time::Duration::from_secs(10)), if server_running && (connection_counter == 0) => {
+            _ = time::sleep(time::Duration::from_secs(60)), if server_running && (connection_counter == 0) => {
                 server_running = false;
                 print!("Timer elapsed, stopping the server... ");
                 if !stop_server().await.success(){
@@ -114,8 +127,19 @@ async fn stop_server() -> process::ExitStatus {
 async fn handle_new_client(
     client_stream: TcpStream,
     server_addr: String,
+    fsm : &Fsm<'_>,
     watchdog_notify_channel: mpsc::Sender<TaskSignal>,
 ) {
+    let (client_stream, packet) = match fsm.run(client_stream).await.unwrap() {
+        // server list ping
+        None => {
+            println!("Server list ping !");
+            return
+        },
+        // server connection
+        Some((client_stream, packet)) => (client_stream, packet),
+    };
+
     println!("New connection !");
 
     // create a channel sent to the watchdog to know whether
@@ -131,7 +155,7 @@ async fn handle_new_client(
     task_listen_channel.await.unwrap();
 
     println!("Proxying the new connection to the server...");
-    let _ = proxy_stream(client_stream, server_addr).await;
+    let _ = proxy_stream(client_stream, server_addr, packet).await;
 
     println!("Connection closed !");
     watchdog_notify_channel
@@ -144,8 +168,11 @@ async fn handle_new_client(
 async fn proxy_stream(
     mut client_stream: TcpStream,
     server_addr: String,
+    packet: HandshakePacket,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut server_stream = TcpStream::connect(server_addr).await?;
+
+    packet.send(&mut server_stream).await?;
 
     let (mut read_client, mut write_client) = client_stream.split();
     let (mut read_server, mut write_server) = server_stream.split();
