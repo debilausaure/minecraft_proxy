@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "1.19.3",
         761,
     ).description(
-        "Debilausaure's server",
+        "May need to start",
     );
     let fsm = Box::new(fsm);
     let fsm : &'static Fsm<'_> = Box::leak(fsm);
