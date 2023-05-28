@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
     let mut connection_counter = 0;
-    let mut server_running = false;
+    let mut server_running = true;
 
     loop {
         tokio::select! {
@@ -110,7 +110,7 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
 
 async fn start_server() -> process::ExitStatus {
     Command::new("curl")
-        .args(&["-XPOST", "--unix-socket", "/var/run/docker.sock", "http://localhost/containers/mc_server/start"])
+        .args(&["-XPOST", "--unix-socket", "/var/run/docker.sock", "http://localhost/containers/minecraft_server/start"])
         .status()
         .await
         .expect("Failed to start the server container")
@@ -118,7 +118,7 @@ async fn start_server() -> process::ExitStatus {
 
 async fn stop_server() -> process::ExitStatus {
     Command::new("curl")
-        .args(&["-XPOST", "--unix-socket", "/var/run/docker.sock", "http://localhost/containers/mc_server/stop"])
+        .args(&["-XPOST", "--unix-socket", "/var/run/docker.sock", "http://localhost/containers/minecraft_server/stop"])
         .status()
         .await
         .expect("Failed to stop the server container")
