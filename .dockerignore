@@ -1,4 +1,4 @@
-proxy/target/*
 .gitignore
-.git/*
-proxy/Cargo.lock
+.git
+target
+Cargo.lock

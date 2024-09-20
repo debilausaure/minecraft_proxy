@@ -5,7 +5,7 @@ FROM rust:alpine as builder
 
 RUN apk add musl-dev --no-cache
 
-COPY proxy/ .
+COPY . .
 
 # Compilation must be fully static, see
 # https://doc.rust-lang.org/edition-guide/rust-2018/platform-and-target-support/musl-support-for-fully-static-binaries.html
@@ -27,5 +27,3 @@ RUN apk update && apk add curl --no-cache
 COPY --from=builder /minecraft_proxy .
 
 ENTRYPOINT ["./minecraft_proxy"]
-# default listen addr, default forward addr
-CMD ["minecraft_proxy_traefik:25565", "minecraft_server:25565"]
