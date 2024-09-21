@@ -11,3 +11,6 @@ log = { version = "0.4.22", features = ["kv_std"] }
 log-panics = "2.1.0"
 mc_server_list_ping = { git = "https://github.com/debilausaure/mc_server_list_ping", branch = "cleanup" }
 tokio = { version = "1.40.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+[profile.release]
+strip = true
