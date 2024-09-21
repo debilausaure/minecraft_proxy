@@ -2,15 +2,16 @@
 
 mod options;
 
-use std::{error::Error, net::SocketAddr, process};
+use std::error::Error;
 
 use clap::Parser;
+use hyper::{client::conn::http1, Method, Request};
+use hyper_util::rt::TokioIo;
 use log::{error, info, warn, LevelFilter};
 use mc_server_list_ping::{types::HandshakePacket, *};
 use tokio::{
     io,
-    net::{TcpListener, TcpStream},
-    process::Command,
+    net::{TcpListener, TcpStream, UnixStream},
     sync::{mpsc, oneshot},
     time,
 };
@@ -44,7 +45,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Spawn a watchdog that will handle connection and disconnection events
     // and decide to start / stop the server.
-    let watchdog_future = watchdog(watchdog_listen_channel);
+    let watchdog_future = watchdog(watchdog_listen_channel, options.minecraft_container_name);
     let _watchdog_handle = tokio::spawn(watchdog_future);
 
     let minecraft_version: &'static str = Box::leak(Box::from(options.minecraft_version));
@@ -58,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     while let Ok((client_stream, _)) = listener.accept().await {
         let new_client_future = handle_new_client(
             client_stream,
-            options.server_socket_addr,
+            options.server_socket_addr.clone(),
             &fsm,
             watchdog_notify_channel.clone(),
         );
@@ -70,7 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
+async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>, container_name: String) {
     let mut connection_counter = 0;
     let mut server_running = true;
 
@@ -80,8 +81,8 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
             _ = time::sleep(time::Duration::from_secs(60)), if server_running && (connection_counter == 0) => {
                 server_running = false;
                 info!(reason = "no active users"; "stopping server");
-                if !stop_server().await.success(){
-                    error!("failed to stop server");
+                if !stop_server(&container_name).await {
+                    panic!("failed to stop server");
                 }
                 info!("server stopped");
             },
@@ -93,7 +94,7 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
                     TaskSignal::New(task_notify_channel) => {
                         if !server_running {
                             info!("starting minecraft server");
-                            if !start_server().await.success() {
+                            if !start_server(&container_name).await {
                                 panic!("failed to start the server");
                             }
                             info!("server started");
@@ -112,35 +113,46 @@ async fn watchdog(mut watchdog_listen_channel: mpsc::Receiver<TaskSignal>) {
     }
 }
 
-async fn start_server() -> process::ExitStatus {
-    Command::new("curl")
-        .args(&[
-            "-XPOST",
-            "--unix-socket",
-            "/var/run/docker.sock",
-            "http://localhost/containers/minecraft_server/start",
-        ])
-        .status()
-        .await
-        .expect("failed to start the server container")
+async fn start_server(container_name: &str) -> bool {
+    run_docker_command(container_name, "start").await
 }
 
-async fn stop_server() -> process::ExitStatus {
-    Command::new("curl")
-        .args(&[
-            "-XPOST",
-            "--unix-socket",
-            "/var/run/docker.sock",
-            "http://localhost/containers/minecraft_server/stop",
-        ])
-        .status()
+async fn stop_server(container_name: &str) -> bool {
+    run_docker_command(container_name, "stop").await
+}
+
+async fn run_docker_command(container_name: &str, command: &str) -> bool {
+    let stream = TokioIo::new(
+        UnixStream::connect("/var/run/docker.sock")
+            .await
+            .expect("unix socket connection failed"),
+    );
+    let (mut request_sender, connection) =
+        http1::handshake(stream).await.expect("handshake failed");
+    tokio::spawn(async move {
+        if let Err(err) = connection.await {
+            error!(err:err; "unix connection failure");
+        }
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "http://localhost/containers/{container_name}/{command}"
+        ))
+        .header("Host", "localhost")
+        .body(http_body_util::Empty::<&[u8]>::new())
+        .expect("invalid request");
+    request_sender
+        .send_request(request)
         .await
-        .expect("failed to stop the server container")
+        .expect("failed to send docker request")
+        .status()
+        .is_success()
 }
 
 async fn handle_new_client(
     client_stream: TcpStream,
-    server_socket_addr: SocketAddr,
+    server_socket_addr: String,
     fsm: &Fsm<'_>,
     watchdog_notify_channel: mpsc::Sender<TaskSignal>,
 ) {
@@ -170,7 +182,9 @@ async fn handle_new_client(
         .await
         .expect("failed to notify watchdog");
     // Make sure the server started before proxying.
-    task_listen_channel.await.expect("failed to notify listener");
+    task_listen_channel
+        .await
+        .expect("failed to notify listener");
 
     info!(client_socket_addr:%; "proxying new connection to server");
     let _ = proxy_stream(client_stream, server_socket_addr, packet).await;
@@ -185,7 +199,7 @@ async fn handle_new_client(
 // Proxies the stream to the server.
 async fn proxy_stream(
     mut client_stream: TcpStream,
-    server_socket_addr: SocketAddr,
+    server_socket_addr: String,
     packet: HandshakePacket,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut server_stream = TcpStream::connect(server_socket_addr).await?;
