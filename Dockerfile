@@ -1,4 +1,4 @@
-FROM rust:1 as builder
+FROM rust:1.92 as builder #compilation fails on 1.93
 WORKDIR /app
 COPY . /app
 RUN cargo build --release
